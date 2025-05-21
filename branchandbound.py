@@ -217,7 +217,15 @@ logicalEffortDict = {
 
 twall = {
     "c17.txt": 28.83,
-    "c432.txt": 153.47
+    "c432.txt": 153.47,
+    "c880.txt": 118.93,
+    "c1908.txt": 177.58,
+    "c2670.txt": 178.69,
+    "c3540.txt": 220.71,
+    "c5315.txt": 203.07,
+    "c6288.txt": 564.64,
+    "c7552.txt": 167.86
+
 }
 cload = 1000
 max_gate_size = 64
@@ -327,8 +335,8 @@ def minimum_area_node_based(fanouts_dict, Tspec, inpGates, x, newlimits):
         GsizeList = [round(float(x), 3) for x in sol["variables"]["x"]]
         keys = list(fanouts_dict.keys())
         GsizeDict = dict(zip(keys, GsizeList))
-        print(f"Minimum Area: {sol['cost']:.2f}")
-        print(GsizeList)
+        # print(f"Minimum Area: {sol['cost']:.2f}")
+        # print(GsizeList)
         return sol['cost'], GsizeDict
     except Exception as e:
         print("Solver failed:", e)
@@ -344,6 +352,7 @@ fanouts_dict, critical_paths_dict = analyze_circuit(circuit)
 
 import math
 x = gates_with_all_primary_inputs(circuit)
+output_gates = gates_with_primary_outputs(circuit)
 N = len(fanouts_dict)
 g = [1.0] * N
 p = [2.0] * N
@@ -387,10 +396,22 @@ class BnBNode:
         self.is_pruned = False
         self.prune_reason = None
 
+import math
+import copy
+import time
+
+time_limit = min(10*len(fanouts_dict), 1800)
+print(time_limit)
+last_area = math.inf 
+best_sol = {}
 def branch_and_bound(fanouts_dict, Tspec, inpGates, x, time_limit):
     start_time = time.time()
     best_area = float('inf')
     best_sizes = None
+    
+    # Track the best solution at each depth
+    best_solution_by_depth = {}
+    max_depth_reached = 0
     
     # Create root node
     root = BnBNode()
@@ -407,6 +428,9 @@ def branch_and_bound(fanouts_dict, Tspec, inpGates, x, time_limit):
     root.sizes = sizes
     root.is_feasible = True
     
+    # Initialize best solution with root solution
+    best_solution_by_depth[0] = (area, sizes)
+    
     # Check if root solution is integer
     all_integer = all(abs(size - round(size)) < 1e-1 for size in sizes.values())
     if all_integer:
@@ -419,6 +443,9 @@ def branch_and_bound(fanouts_dict, Tspec, inpGates, x, time_limit):
         # Get the next node to process
         current_node = queue.pop(0)
         
+        # Update max depth reached
+        max_depth_reached = max(max_depth_reached, current_node.depth)
+        
         # Skip if already pruned
         if current_node.is_pruned:
             continue
@@ -428,6 +455,10 @@ def branch_and_bound(fanouts_dict, Tspec, inpGates, x, time_limit):
             current_node.is_pruned = True
             current_node.prune_reason = "Bound exceeds best solution"
             continue
+        
+        # Track best solution at this depth
+        if current_node.depth not in best_solution_by_depth or current_node.area < best_solution_by_depth[current_node.depth][0]:
+            best_solution_by_depth[current_node.depth] = (current_node.area, current_node.sizes.copy())
         
         # If solution is integer, update best solution if better
         all_integer = all(abs(size - round(size)) < 1e-1 for size in current_node.sizes.values())
@@ -456,6 +487,7 @@ def branch_and_bound(fanouts_dict, Tspec, inpGates, x, time_limit):
             depth=current_node.depth + 1,
             parent=current_node
         )
+        
         current_node.left_child = left_child
         
         # Solve left child
@@ -468,19 +500,23 @@ def branch_and_bound(fanouts_dict, Tspec, inpGates, x, time_limit):
             left_child.sizes = left_sizes
             left_child.is_feasible = True
             
-            # Check if this is a new best integer solution
-            left_all_integer = all(abs(size - round(size)) < 1e-1 for size in left_sizes.values())
-            if left_all_integer and left_area < best_area:
-                best_area = left_area
-                best_sizes = left_sizes.copy()
-                print(f"New best solution found at depth {left_child.depth}: {best_area}")
-            
-            # Only add to queue if it's not pruned
-            if left_child.area < best_area:
-                queue.append(left_child)
-            else:
+            # Prune if bound exceeds best solution
+            if left_child.area >= best_area:
                 left_child.is_pruned = True
                 left_child.prune_reason = "Bound exceeds best solution"
+            else:
+                queue.append(left_child)
+                
+                # Update best solution at this depth
+                depth = left_child.depth
+                if depth not in best_solution_by_depth or left_area < best_solution_by_depth[depth][0]:
+                    best_solution_by_depth[depth] = (left_area, left_sizes.copy())
+                
+                # Update best solution if integer
+                if all(abs(size - round(size)) < 1e-1 for size in left_sizes.values()):
+                    if left_area < best_area:
+                        best_area = left_area
+                        best_sizes = left_sizes.copy()
         else:
             left_child.is_feasible = False
             left_child.is_pruned = True
@@ -492,6 +528,7 @@ def branch_and_bound(fanouts_dict, Tspec, inpGates, x, time_limit):
             depth=current_node.depth + 1,
             parent=current_node
         )
+        
         current_node.right_child = right_child
         
         # Solve right child
@@ -504,32 +541,46 @@ def branch_and_bound(fanouts_dict, Tspec, inpGates, x, time_limit):
             right_child.sizes = right_sizes
             right_child.is_feasible = True
             
-            # Check if this is a new best integer solution
-            right_all_integer = all(abs(size - round(size)) < 1e-1 for size in right_sizes.values())
-            if right_all_integer and right_area < best_area:
-                best_area = right_area
-                best_sizes = right_sizes.copy()
-                print(f"New best solution found at depth {right_child.depth}: {best_area}")
-            
-            # Only add to queue if it's not pruned
-            if right_child.area < best_area:
-                queue.append(right_child)
-            else:
+            # Prune if bound exceeds best solution
+            if right_child.area >= best_area:
                 right_child.is_pruned = True
                 right_child.prune_reason = "Bound exceeds best solution"
+            else:
+                queue.append(right_child)
+                
+                # Update best solution at this depth
+                depth = right_child.depth
+                if depth not in best_solution_by_depth or right_area < best_solution_by_depth[depth][0]:
+                    best_solution_by_depth[depth] = (right_area, right_sizes.copy())
+                
+                # Update best solution if integer
+                if all(abs(size - round(size)) < 1e-1 for size in right_sizes.values()):
+                    if right_area < best_area:
+                        best_area = right_area
+                        best_sizes = right_sizes.copy()
         else:
             right_child.is_feasible = False
             right_child.is_pruned = True
             right_child.prune_reason = "Infeasible"
-        
-        # Print debug info
+    
         print(f"Depth {current_node.depth}: Branched on {branch_gate} with value {current_node.sizes[branch_gate]}")
         print(f"  Left ({floor_val}): {'Feasible' if left_child.is_feasible else 'Infeasible'}, Area: {left_child.area if left_child.is_feasible else 'N/A'}")
         print(f"  Right ({ceil_val}): {'Feasible' if right_child.is_feasible else 'Infeasible'}, Area: {right_child.area if right_child.is_feasible else 'N/A'}")
     
-    # If we exit due to time limit
+    # Check if time limit was reached
     if time.time() - start_time >= time_limit:
-        print(f"Time limit of {time_limit} seconds reached. Stopping process.")
+        print(f"Time limit of {time_limit} seconds reached.")
+        
+        # If no integer solution found, use the best solution from the deepest level
+        if best_area == float('inf') and max_depth_reached in best_solution_by_depth:
+            best_area, best_sizes = best_solution_by_depth[max_depth_reached]
+            print(f"Using best solution from max depth {max_depth_reached} with area {best_area}")
+    
+    # If no integer solution found, use the best solution from the deepest level
+    if best_area == float('inf') and best_solution_by_depth:
+        max_depth = max(best_solution_by_depth.keys())
+        best_area, best_sizes = best_solution_by_depth[max_depth]
+        print(f"No integer solution found. Using best solution from depth {max_depth} with area {best_area}")
     
     # Round the final solution to integers if needed
     if best_sizes:
@@ -546,120 +597,13 @@ def branch_and_bound(fanouts_dict, Tspec, inpGates, x, time_limit):
         # Recalculate the final area
         best_area = sum(best_sizes.values())
     
-    return best_area, best_sizes  # Return the root to access the entire tree
+    return best_area, best_sizes
 
-
-# def solve(fanouts_dict ,Tspec, alpha, inpGates, x):
-#     sol, f = minimum_area_node_based(fanouts_dict ,Tspec, alpha, inpGates, x)
-#     i = 0
-#     initialLP = Node(i)
-#     initialLP._area = sol
-#     initialLP._sol = f
-#     listToCheck = [initialLP]
-
-#     while listToCheck:
-#         c = listToCheck.pop(0)
-#         if is_sol_integer(c._sol):
-#             return c._area, c._sol
-
-#         frac_idx = None
-#         max_frac = 0
-#         for j in range(len(c._sol)):
-#             if 0 < abs(c._sol[j] - round(c._sol[j])) > max_frac:
-#                 max_frac = abs(c._sol[j] - round(c._sol[j]))
-#                 frac_idx = j
-
-#         if frac_idx is None:
-#             continue
-
-#         x = [v for v in c._m.vars]
-
-#         floor_val = math.floor(c._sol[frac_idx])
-#         ceil_val = math.ceil(c._sol[frac_idx])
-
-#         i += 1
-#         right = Node(i)
-#         right._m = c._m.copy()
-#         right._m += x[frac_idx] <= floor_val
-#         right._sol, right._f = simplex(right._m, obj)
-
-#         i += 1
-#         left = Node(i)
-#         left._m = c._m.copy()
-#         left._m += x[frac_idx] >= ceil_val
-#         left._sol, left._f = simplex(left._m, obj)
-
-#         listToCheck.append(left)
-#         listToCheck.append(right)
-
-#     return sol, f
-# solve(fanouts_dict ,tspec, alpha, inpGates, x)
-
-import math
-import copy
-import time
-
-time_limit = min(10*len(fanouts_dict), 1800)
-print(time_limit)
-# Branch-and-bound function
-
-
-
-last_area = math.inf 
-best_sol = {}
-# def branch_and_bound(fanouts_dict ,Tspec, inpGates, x,constraints, incumbent_area=float('inf'), incumbent_sizes=None):
-#     global last_area 
-#     global  best_sol
-#     if incumbent_area < last_area:
-#         last_area = incumbent_area
-#         best_sol = incumbent_sizes
-        
-#     elapsed_time = time.time() - start_time
-#     if elapsed_time > time_limit:
-#         print(f"Time limit of {time_limit} seconds reached. Stopping process.")
-#         return incumbent_area, incumbent_sizes
-    
-#     result = minimum_area_node_based(fanouts_dict ,Tspec, inpGates, x,constraints)
-    
-#     if result is False:
-#         return incumbent_area, incumbent_sizes
-    
-#     area, sizes = result
-
-#     if area >= incumbent_area:
-#         return incumbent_area, incumbent_sizes
-
-#     all_integer = all(abs(size - round(size)) < 1e-1 for size in sizes.values())
-#     if all_integer:
-#         return area, sizes  
-
-#     for gate, size in sizes.items():
-#         if abs(size - round(size)) > 1e-1:
-#             branch_gate = gate
-#             break
-
-#     floor_val = math.floor(sizes[branch_gate])
-#     ceil_val = math.ceil(sizes[branch_gate])
-    
-#     # Left branch: gate ≤ floor
-#     left_constraints = copy.deepcopy(constraints)
-#     left_constraints.append((branch_gate, '<=', floor_val))
-#     incumbent_area, incumbent_sizes = branch_and_bound(
-#         fanouts_dict ,Tspec, inpGates, x,left_constraints, incumbent_area, incumbent_sizes
-#     )
-    
-#     # Right branch: gate ≥ ceil
-#     right_constraints = copy.deepcopy(constraints)
-#     right_constraints.append((branch_gate, '>=', ceil_val))
-#     incumbent_area, incumbent_sizes = branch_and_bound(
-#         fanouts_dict ,Tspec, inpGates, x,right_constraints, incumbent_area, incumbent_sizes
-#     )
-    
-#     return incumbent_area, incumbent_sizes
 
 start_time = time.time()
 print(time)
 a, b = branch_and_bound(fanouts_dict ,tspec, inpGates, x, time_limit)
+print(a,b)
 if b:
     best_sizes = b
     best_area = a
@@ -671,8 +615,10 @@ for name in best_sizes:
     if abs(i - round(i)) > 1e-1:
         if name in x:
             best_sizes[name] = math.floor(i)
-        else:
+        elif name in output_gates:
             best_sizes[name] = math.ceil(i)
+        else:
+            best_sizes[name] = round(i)
     else:
         best_sizes[name] = round(i)
 best_area = sum(i for i in best_sizes.values())
@@ -681,71 +627,168 @@ print("Best sizes:", best_sizes)
 
 import cvxpy as cp
 
-def solve_mixed_integer_gp(fanouts_dict, Tspec, inpGates, x):
-    N = len(fanouts_dict)
-    Gsize = cp.Variable(N, integer=True)  # Gate sizes as integer variables
-    T = cp.Variable(N)
+# def solve_mixed_integer_gp(fanouts_dict, Tspec, inpGates, x):
+#     N = len(fanouts_dict)
+#     Gsize = cp.Variable(N, integer=True)  # Gate sizes as integer variables
+#     T = cp.Variable(N)
 
-    g = [1.0] * N
-    p = [2.0] * N
-    gate_index_map = {}
+#     g = [1.0] * N
+#     p = [2.0] * N
+#     gate_index_map = {}
 
-    for gate in fanouts_dict:
-        gate_type, num_inputs, _ = get_gate_type_and_inputs(gate)
-        idx = int(gate.split("_")[1]) - 1
-        gate_index_map[gate] = idx
-        g[idx] = logicalEffortDict.get((gate_type, num_inputs), 1.0)
-        p[idx] = num_inputs
+#     for gate in fanouts_dict:
+#         gate_type, num_inputs, _ = get_gate_type_and_inputs(gate)
+#         idx = int(gate.split("_")[1]) - 1
+#         gate_index_map[gate] = idx
+#         g[idx] = logicalEffortDict.get((gate_type, num_inputs), 1.0)
+#         p[idx] = num_inputs
 
-    constraints = [Gsize >= 1, Gsize <= max_gate_size]
+#     constraints = [Gsize >= 1, Gsize <= max_gate_size]
 
-    # Setup delay constraints
-    for gate in fanouts_dict:
-        idx = gate_index_map[gate]
-        input_gates = circuit.gates[gate].outputs
+#     # Setup delay constraints
+#     for gate in fanouts_dict:
+#         idx = gate_index_map[gate]
+#         input_gates = circuit.gates[gate].outputs
 
-        # Fanout delay
-        total_fo_effort = 0
-        for fanout in fanouts_dict[gate]:
-            if fanout in gate_index_map:
-                f_idx = gate_index_map[fanout]
-                total_fo_effort += g[f_idx] * Gsize[f_idx]
+#         # Fanout delay
+#         total_fo_effort = 0
+#         for fanout in fanouts_dict[gate]:
+#             if fanout in gate_index_map:
+#                 f_idx = gate_index_map[fanout]
+#                 total_fo_effort += g[f_idx] * Gsize[f_idx]
 
-        delay = p[idx]
-        if total_fo_effort != 0:
-            delay += total_fo_effort / Gsize[idx]
+#         delay = p[idx]
+#         delay += total_fo_effort / Gsize[idx]
 
-        for input_gate in input_gates:
-            if input_gate.name in gate_index_map:
-                input_idx = gate_index_map[input_gate.name]
-                constraints.append(T[input_idx] >= T[idx] + delay)
+#         for input_gate in input_gates:
+#             if input_gate.name in gate_index_map:
+#                 input_idx = gate_index_map[input_gate.name]
+#                 constraints.append(T[input_idx] >= T[idx] + delay)
 
-    # Primary input timing = 0
-    for gate_name in inpGates:
-        if gate_name in gate_index_map:
-            constraints.append(T[gate_index_map[gate_name]] == 0)
+#     # Primary input timing = 0
+#     for gate_name in inpGates:
+#         if gate_name in gate_index_map:
+#             constraints.append(T[gate_index_map[gate_name]] == 0)
 
-    # Output gates must meet Tspec
-    for gate in gates_with_primary_outputs(circuit):
-        if gate in gate_index_map:
-            idx = gate_index_map[gate]
-            load_delay = cload / Gsize[idx]
-            constraints.append(T[idx] + load_delay + p[idx] <= Tspec)
+#     # Output gates must meet Tspec
+#     for gate in gates_with_primary_outputs(circuit):
+#         if gate in gate_index_map:
+#             idx = gate_index_map[gate]
+#             load_delay = cload / Gsize[idx]
+#             constraints.append(T[idx] + load_delay + p[idx] <= Tspec)
 
-    # Objective: minimize area (sum of gate sizes)
-    objective = cp.Minimize(cp.sum(Gsize))
+#     # Objective: minimize area (sum of gate sizes)
+#     objective = cp.Minimize(cp.sum(Gsize))
 
-    prob = cp.Problem(objective, constraints)
-    try:
-        prob.solve(solver=cp.GLPK_MI, verbose=True)  # GLPK_MI supports integer programming
-        GsizeList = [round(val) for val in Gsize.value]
-        keys = list(fanouts_dict.keys())
-        GsizeDict = dict(zip(keys, GsizeList))
-        print(f"MIGP Area: {sum(GsizeList)}")
-        print("MIGP Sizes:", GsizeDict)
-        return sum(GsizeList), GsizeDict
-    except Exception as e:
-        print("MIGP solver failed:", e)
-        return None, None
+#     prob = cp.Problem(objective, constraints)
+#     try:
+#         prob.solve(solver=cp.GLPK_MI, verbose=True)  # GLPK_MI supports integer programming
+#         GsizeList = [round(val) for val in Gsize.value]
+#         keys = list(fanouts_dict.keys())
+#         GsizeDict = dict(zip(keys, GsizeList))
+#         print(f"MIGP Area: {sum(GsizeList)}")
+#         print("MIGP Sizes:", GsizeDict)
+#         return sum(GsizeList), GsizeDict
+#     except Exception as e:
+#         print("MIGP solver failed:", e)
+#         return None, None
+
+# def solve_mixed_integer_gp(fanouts_dict, Tspec, inpGates, x):
+#     N = len(fanouts_dict)
+#     Gsize = cp.Variable(N, integer=True)  # Gate sizes as integer variables
+#     T = cp.Variable(N)  # Arrival times
+    
+#     g = [1.0] * N
+#     p = [2.0] * N
+#     gate_index_map = {}
+    
+#     # Map gates to indices
+#     for i, gate in enumerate(fanouts_dict.keys()):
+#         gate_type, num_inputs, _ = get_gate_type_and_inputs(gate)
+#         gate_index_map[gate] = i
+#         g[i] = logicalEffortDict.get((gate_type, num_inputs), 1.0)
+#         p[i] = num_inputs
+    
+#     constraints = [Gsize >= 1, Gsize <= max_gate_size]
+    
+#     # Setup delay constraints using linear approximation
+#     for gate in fanouts_dict:
+#         idx = gate_index_map[gate]
+#         input_gates = circuit.gates[gate].outputs
+        
+#         # For each input gate, create a timing constraint
+#         for input_gate in input_gates:
+#             if input_gate.name in gate_index_map:
+#                 input_idx = gate_index_map[input_gate.name]
+                
+#                 # Instead of division, use multiplication on the other side
+#                 # Original: T[input_idx] >= T[idx] + p[idx] + total_fo_effort / Gsize[idx]
+#                 # Rewrite as: T[input_idx] * Gsize[idx] >= T[idx] * Gsize[idx] + p[idx] * Gsize[idx] + total_fo_effort
+                
+#                 # But this is still not linear. So we'll use a piecewise linear approximation
+#                 # or a different approach:
+                
+#                 # Approach 1: Use a conservative fixed delay estimate based on minimum gate size
+#                 min_delay = p[idx] + (sum(g[gate_index_map[fo]] * max_gate_size for fo in fanouts_dict[gate])) / 1.0
+#                 constraints.append(T[input_idx] >= T[idx] + min_delay)
+                
+#                 # Approach 2: Create multiple constraints for different possible gate sizes
+#                 # This is more accurate but adds more constraints
+#                 for size in range(1, max_gate_size + 1):
+#                     # If Gsize[idx] == size, then this constraint should apply
+#                     # We can model this with indicator constraints if the solver supports them
+#                     total_fo_effort = sum(g[gate_index_map[fo]] * max_gate_size for fo in fanouts_dict[gate])
+#                     delay_at_size = p[idx] + total_fo_effort / size
+                    
+#                     # Create indicator constraint: Gsize[idx] == size => T[input_idx] >= T[idx] + delay_at_size
+#                     # Many solvers support this directly, but for GLPK_MI we need to reformulate:
+#                     M = 1000  # A large constant
+#                     indicator = cp.Variable(boolean=True)
+#                     constraints.append(Gsize[idx] <= size - 1 + M * indicator)
+#                     constraints.append(Gsize[idx] >= size - M * (1 - indicator))
+#                     constraints.append(T[input_idx] >= T[idx] + delay_at_size - M * (1 - indicator))
+    
+#     # Primary input timing = 0
+#     for gate_name in inpGates:
+#         if gate_name in gate_index_map:
+#             constraints.append(T[gate_index_map[gate_name]] == 0)
+    
+#     # Output gates must meet Tspec
+#     for gate in gates_with_primary_outputs(circuit):
+#         if gate in gate_index_map:
+#             idx = gate_index_map[gate]
+#             # Again, avoid division
+#             for size in range(1, max_gate_size + 1):
+#                 load_delay = cload / size
+                
+#                 # Create indicator constraint
+#                 M = 1000
+#                 indicator = cp.Variable(boolean=True)
+#                 constraints.append(Gsize[idx] <= size - 1 + M * indicator)
+#                 constraints.append(Gsize[idx] >= size - M * (1 - indicator))
+#                 constraints.append(T[idx] + load_delay + p[idx] <= Tspec + M * (1 - indicator))
+    
+#     # Objective: minimize area (sum of gate sizes)
+#     objective = cp.Minimize(cp.sum(Gsize))
+    
+#     prob = cp.Problem(objective, constraints)
+#     try:
+#         # Use a solver that supports integer and binary variables
+#         prob.solve(solver=cp.GLPK_MI, verbose=True)
+        
+#         if prob.status == cp.OPTIMAL:
+#             GsizeList = [int(round(val)) for val in Gsize.value]
+#             keys = list(fanouts_dict.keys())
+#             GsizeDict = dict(zip(keys, GsizeList))
+#             print(f"MIGP Area: {sum(GsizeList)}")
+#             print("MIGP Sizes:", GsizeDict)
+#             return sum(GsizeList), GsizeDict
+#         else:
+#             print(f"Solver status: {prob.status}")
+#             return None, None
+#     except Exception as e:
+#         print("MIGP solver failed:", e)
+#         return None, None
+
 
 # solve_mixed_integer_gp(fanouts_dict, tspec, inpGates, x)
